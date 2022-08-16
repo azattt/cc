@@ -32,10 +32,6 @@ async def ainput(string: str) -> str:
     return await asyncio.get_event_loop().run_in_executor(None, sys.stdin.readline)
 
 
-async def i(s):
-    await global_queue.put(s)
-
-
 class YandexCaptcha:
     def __init__(self, url: str):
         pass
@@ -212,7 +208,6 @@ class YandexClient:
         elif "Неправильный логин" in resp_text:
             await self.raise_and_exit(RuntimeError("Wrong credentials (password)"))
         elif "js-domik-captcha" in resp_text:
-            await save_page("test", initial_visit_resp)
             while True:
                 captcha_url_found = re.findall(r"(?<=t\" src=\").*?(?=\")", resp_text)
                 if not captcha_url_found:
@@ -237,7 +232,6 @@ class YandexClient:
                     "https://passport.yandex.ru/auth", data=auth_data
                 )
                 resp_text = await visit_resp.text()
-                await save_page("test1", visit_resp)
                 if "Нет аккаунта" in resp_text:
                     await self.raise_and_exit(RuntimeError("Wrong credentials (login)"))
                 elif "Неправильный логин или пароль" in resp_text:
@@ -268,43 +262,71 @@ class YandexClient:
             if await self.check_kinopoisk_login():
                 pass
 
-        kinopoisk_request = await self.session.get("http://kinopoisk.ru/")
-
-        if kinopoisk_request.status != 200:
-            await save_page("fail", kinopoisk_request)
-            await self.raise_and_exit(
-                RuntimeError('"http://kinopoisk.ru" didn\'t return 200')
-            )
+        for i in range(self.kinopoisk_retries):
+            kinopoisk_request = await self.session.get("http://kinopoisk.ru/")
+            if kinopoisk_request.status == 200:
+                if i != 0:
+                    self.logger.warning(
+                        "Kinopoisk request succeded only from %i-th retry", i
+                    )
+                break
+        else:
+            if kinopoisk_request.status != 200:
+                await save_page("fail", kinopoisk_request)
+                await self.raise_and_exit(
+                    RuntimeError('"http://kinopoisk.ru" didn\'t return 200')
+                )
 
         if "captcha" in str(kinopoisk_request.url):
-            self._handle_kinopoisk_captcha(kinopoisk_request)
+            await self._handle_kinopoisk_captcha(kinopoisk_request)
 
-        r = await client.session.get(
+        auth = await self.session.get(
             "https://passport.yandex.ru/auth?origin=kinopoisk&retpath=https%3A%2F%2Fsso.passport.yandex.ru%2Fpush%3Fretpath%3Dhttps%253A%252F%252Fwww.kinopoisk.ru%252Fapi%252Fprofile-pending%252F%253Fretpath%253Dhttps%25253A%25252F%25252Fwww.kinopoisk.ru%25252F%26"
         )
-        await save_page("sso", r)
-        r_text = await r.text()
-        sso_found = r_text.split("https://sso.passport.yandex.ru/push")[1].split('"')[0]
+        auth_text = await auth.text()
+        sso_found = auth_text.split("https://sso.passport.yandex.ru/push")[1].split(
+            '"'
+        )[0]
         if not sso_found:
-            raise RuntimeError("sso not found")
+            self.raise_and_exit(RuntimeError("sso not found"))
         my_uuid = uuid.uuid4()
         sso_found = sso_found.replace("&amp;", "&uuid=" + str(my_uuid))
-        r1 = await client.session.get("https://sso.passport.yandex.ru/push" + sso_found)
-        await save_page("sso1", r1)
-        element_2_found = (await r1.text()).split("element2.value = '")[1].split("'")[0]
-        r2 = await client.session.post(
+        sso_push = await self.session.get(
+            "https://sso.passport.yandex.ru/push" + sso_found
+        )
+        try:
+            container_found = (
+                (await sso_push.text()).split("element2.value = '")[1].split("'")[0]
+            )
+        except IndexError:
+            self.raise_and_exit(
+                RuntimeError(
+                    "Kinopoisk login: couldn't find container for https://sso.kinopoisk.ru/install"
+                )
+            )
+
+        install = await self.session.post(
             "https://sso.kinopoisk.ru/install?uuid=" + str(my_uuid),
             data={
                 "retpath": "https://www.kinopoisk.ru/api/profile-pending/?retpath=https%3A%2F%2Fwww.kinopoisk.ru%2F",
-                "container": element_2_found,
+                "container": container_found,
             },
         )
-        await save_page("sso2", r2)
-        r3 = await client.session.get(
+        if install.status != 200:
+            self.raise_and_exit(
+                RuntimeError(
+                    "Kinopoisk login: https://sso.kinopoisk.ru/install didn't return status 200"
+                )
+            )
+        final_auth = await self.session.get(
             "http://www.kinopoisk.ru/api/profile-pending/?retpath=https%3A%2F%2Fwww.kinopoisk.ru%2F"
         )
-        await save_page("sso3", r3)
-
+        if final_auth.status != 200:
+            await self.raise_and_exit(
+                RuntimeError(
+                    "Kinopoisk login: final auth request didn't return status 200"
+                )
+            )
         asyncio.create_task(self.save_cookies())
 
     async def close(self):
@@ -317,16 +339,16 @@ global_queue = asyncio.Queue()
 
 async def main():
     global client
-    # logger = logging.getLogger()
-    # logger.setLevel(logging.DEBUG)
-    # ch = logging.StreamHandler()
-    # ch.setLevel(logging.DEBUG)
-    # formatter = logging.Formatter(
-    #     "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    # )
-    # ch.setFormatter(formatter)
-    # logger.addHandler(ch)
-    # logging.getLogger("asyncio").setLevel(logging.WARNING)
+    logger = logging.getLogger()
+    logger.setLevel(logging.ERROR)
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.DEBUG)
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
+    ch.setFormatter(formatter)
+    logger.addHandler(ch)
+    logging.getLogger("asyncio").setLevel(logging.WARNING)
 
     login, password = await load_credentials("credentials.txt")
     client = YandexClient()
