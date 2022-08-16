@@ -1,2 +1,4 @@
 debug/
+__pycache__/
 credentials.txt
+test.ipynb
