@@ -1,4 +1,4 @@
-import json
+import copy
 import re
 import asyncio
 import logging
@@ -32,23 +32,19 @@ async def ainput(string: str) -> str:
     return await asyncio.get_event_loop().run_in_executor(None, sys.stdin.readline)
 
 
-class YandexCaptcha:
-    def __init__(self, url: str):
-        pass
+class YaClient:
+    def __init__(self, cookie_save_path: str = "cookie.bin") -> None:
+        self.session: aiohttp.ClientSession
+        self.cookie_save_path = cookie_save_path
+        self.logger: logging.Logger
 
-    def download(self, path: str):
-        pass
+    def create_session(self, user_agent: str) -> aiohttp.ClientSession:
+        session = aiohttp.ClientSession()
+        session.headers.update({"user-agent": user_agent})
+        return session
 
-
-class YandexClient:
-    FAKE_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/103.0.5060.134 Safari/537.36 OPR/89.0.4447.83"
-
-    def __init__(self):
-        self.session = aiohttp.ClientSession()
-        self.session.headers.update({"user-agent": YandexClient.FAKE_USER_AGENT})
-        self.cookie_save_path = "debug/cookie.bin"
-        self.logger = logging.getLogger()
-        self.kinopoisk_retries = 10
+    async def close_session(self):
+        await self.session.close()
 
     async def save_cookies(self):
         await asyncio.get_event_loop().run_in_executor(
@@ -60,13 +56,33 @@ class YandexClient:
             None, self.session.cookie_jar.load, self.cookie_save_path
         )
 
+    async def _download_captcha(self, url):
+        async with self.session.get(url) as resp:
+            f = await aiofiles.open("debug/captcha.jpg", mode="wb+")
+            await f.write(await resp.read())
+            await f.close()
+
+    async def raise_and_exit(self, exc: Exception):
+        await self.close_session()
+        raise exc
+
+
+class YandexClient(YaClient):
+    FAKE_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/103.0.5060.134 Safari/537.36 OPR/89.0.4447.83"
+
+    def __init__(self, user_agent: str = FAKE_USER_AGENT):
+        super().__init__()
+        self.logger = logging.getLogger("yandex_client")
+        self.kinopoisk_retries = 10
+        self.session = self.create_session(user_agent)
+        self.user_agent = user_agent
+
     async def captcha_proof_request(
         self,
     ):
         self.raise_and_exit(NotImplementedError("Not implemented yet"))
 
     async def _handle_challenge(self, resp: aiohttp.ClientResponse):
-        self.raise_and_exit(RuntimeError("challenge"))
         resp_text = await resp.text()
         phoneId_found = re.findall(r"(?<=\"phoneId\":).*?(?=})", resp_text)
         csrf_found = re.findall(r"(?<=\"csrf\":\").*?(?=\")", resp_text)
@@ -76,7 +92,7 @@ class YandexClient:
                 "Challenge: phoneId_found, csrf_found or track_id_found are not found"
             )
 
-        await self.session.post(
+        validate_phone_by_id = await self.session.post(
             "https://passport.yandex.ru/registration-validations/auth/validate_phone_by_id",
             data={
                 "phoneId": phoneId_found[0],
@@ -85,7 +101,12 @@ class YandexClient:
             },
             headers={"X-Requested-With": "XMLHttpRequest"},
         )
-        await self.session.post(
+        validate_phone_by_id_json = await validate_phone_by_id.json()
+        if validate_phone_by_id_json["status"] != "ok":
+            await self.raise_and_exit(
+                RuntimeError('Challenge: "validate_phone_by_id" status != ok')
+            )
+        code_submit = await self.session.post(
             "https://passport.yandex.ru/registration-validations/phone-confirm-code-submit",
             data={
                 "phone_id": phoneId_found[0],
@@ -96,8 +117,13 @@ class YandexClient:
             },
             headers={"X-Requested-With": "XMLHttpRequest"},
         )
+        code_submit_json = await code_submit.json()
+        if code_submit_json["status"] != "ok":
+            await self.raise_and_exit(
+                RuntimeError('Challenge: "code_submit" status != ok')
+            )
         while True:
-            code_input = await input("Enter code from SMS:")
+            code_input = await ainput("Enter code from SMS:")
             code_confirm_resp = await self.session.post(
                 "https://passport.yandex.ru/registration-validations/phone-confirm-code",
                 data={
@@ -117,82 +143,29 @@ class YandexClient:
                 continue
             self.raise_and_exit(RuntimeError(f"Unexpected error {code_confirm_json}"))
 
-    async def _handle_kinopoisk_captcha(self, req: aiohttp.ClientResponse):
-        captcha_url_found = re.findall(r"(?<=action=\").*?(?=\")", await req.text())
-        if not captcha_url_found:
-            await self.raise_and_exit(RuntimeError("Captcha error: no captcha url"))
-        captcha_url = captcha_url_found[0]
-        showcaptcha = await self.session.post("http://kinopoisk.ru" + captcha_url)
-        showcaptcha_text = await showcaptcha.text()
-        captcha_image_found = re.findall(
-            r"(?<=src\=\"http://kinopoisk.ru/captchaimg\?).*?(?=\")",
-            showcaptcha_text,
-        )
-        if not captcha_image_found:
-            await self.raise_and_exit(RuntimeError("Captcha image not found"))
-        captcha_image_url = captcha_image_found[0]
-        await self._download_captcha(
-            "http://kinopoisk.ru/captchaimg?" + captcha_image_url
-        )
-        captcha_input = await ainput("Enter captcha:")
-        print("got")
-        checkcaptcha_found = re.findall(
-            r"(?<=checkcaptcha\?).*?(?=\")", showcaptcha_text
-        )
-        aesKey_found = re.findall(r"(?<=aesKey:\").*?(?=\")", showcaptcha_text)
-        signKey_found = re.findall(r"(?<=aesSign:\").*?(?=\")", showcaptcha_text)
-        if not checkcaptcha_found or not aesKey_found or not signKey_found:
-            await self.raise_and_exit(
-                RuntimeError(
-                    "not checkcaptcha_found or not aesKey_found or not signKey_found"
-                )
-            )
-        checkcaptcha = await self.session.get(
-            "http://kinopoisk.ru/checkcaptcha?" + checkcaptcha_found[0],
-            data={
-                "rep": captcha_input,
-                "aesKey": aesKey_found[0],
-                "signKey": signKey_found[0],
-            },
-            params={"rep": captcha_input},
-        )
-        if str(checkcaptcha.url) != "https://www.kinopoisk.ru/":
-            self.raise_and_exit(NotImplementedError("Unlucky :( , try again..."))
-
-    async def raise_and_exit(self, exc: Exception):
-        await self.close()
-        raise exc
-
-    async def check_yandex_login(self):
-        async with self.session.get("https://passport.yandex.ru") as resp:
-            if "profile" in str(resp.url):
-                return True
-            if "auth" in str(resp.url):
+    async def check_login(self):
+        async with self.session.get(
+            "https://api.passport.yandex.ru/all_accounts"
+        ) as resp:
+            resp_json = await resp.json()
+            if "accounts" not in resp_json:
                 return False
-            await self.raise_and_exit(RuntimeError("Unexpected URL"))
-
-    async def check_kinopoisk_login(self):
-        async with self.session.get("http://hd.kinopoisk.ru/personal") as resp:
-            if "personal" in str(resp.url):
+            if resp_json["accounts"]:
                 return True
-            return False
+            if CC_DEBUG:
+                await save_page("error", resp)
+            await self.raise_and_exit(RuntimeError("Unexpected response"))
 
-    async def _download_captcha(self, url):
-        async with self.session.get(url) as resp:
-            f = await aiofiles.open("debug/captcha.jpg", mode="wb+")
-            await f.write(await resp.read())
-            await f.close()
-
-    async def login_yandex(self, login, password):
+    async def login(self, login, password):
         # TODO: support for two-factor authentication
         try:
             await self.load_cookies()
         except FileNotFoundError:
-            pass
+            self.logger.warning("Cookie file not found", exc_info=1)
         except EOFError:
             self.logger.warning("Cookie file may be corrupted", exc_info=1)
         else:
-            is_logined = await self.check_yandex_login()
+            is_logined = await self.check_login()
             if is_logined:
                 return
 
@@ -251,7 +224,28 @@ class YandexClient:
             # means success
             asyncio.create_task(self.save_cookies())
 
-    async def login_kinopoisk(self):
+
+class KinopoiskClient(YaClient):
+    FAKE_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/103.0.5060.134 Safari/537.36 OPR/89.0.4447.83"
+
+    def __init__(self, yandex_client_already_logined: YandexClient) -> None:
+        super().__init__()
+        self.kinopoisk_retries = 10
+        self.logger = logging.getLogger("kinopoisk_client")
+        self.bound_yandex_client = yandex_client_already_logined
+        self.session = self.create_session(yandex_client_already_logined.user_agent)
+        self.session.cookie_jar._cookies = copy.deepcopy(
+            yandex_client_already_logined.session.cookie_jar._cookies
+        )
+
+    async def check_login(self):
+        async with self.session.get("https://www.kinopoisk.ru/api/mda-status/") as resp:
+            resp_json = await resp.json()
+            if resp_json["sessionStatus"]:
+                return True
+            return False
+
+    async def login(self):
         try:
             await self.load_cookies()
         except FileNotFoundError:
@@ -259,15 +253,15 @@ class YandexClient:
         except EOFError:
             pass
         else:
-            if await self.check_kinopoisk_login():
-                pass
+            if await self.check_login():
+                return
 
         for i in range(self.kinopoisk_retries):
             kinopoisk_request = await self.session.get("http://kinopoisk.ru/")
             if kinopoisk_request.status == 200:
                 if i != 0:
                     self.logger.warning(
-                        "Kinopoisk request succeded only from %i-th retry", i
+                        "Kinopoisk request succeded only from %i-th retry", i + 1
                     )
                 break
         else:
@@ -277,8 +271,7 @@ class YandexClient:
                     RuntimeError('"http://kinopoisk.ru" didn\'t return 200')
                 )
 
-        if "captcha" in str(kinopoisk_request.url):
-            await self._handle_kinopoisk_captcha(kinopoisk_request)
+        await self._handle_captcha(kinopoisk_request)
 
         auth = await self.session.get(
             "https://passport.yandex.ru/auth?origin=kinopoisk&retpath=https%3A%2F%2Fsso.passport.yandex.ru%2Fpush%3Fretpath%3Dhttps%253A%252F%252Fwww.kinopoisk.ru%252Fapi%252Fprofile-pending%252F%253Fretpath%253Dhttps%25253A%25252F%25252Fwww.kinopoisk.ru%25252F%26"
@@ -329,8 +322,59 @@ class YandexClient:
             )
         asyncio.create_task(self.save_cookies())
 
-    async def close(self):
-        await self.session.close()
+    async def _handle_captcha(self, req: aiohttp.ClientResponse):
+        if "captcha" not in str(req.url):
+            return
+
+        while True:
+            captcha_url_found = re.findall(r"(?<=action=\").*?(?=\")", await req.text())
+            if not captcha_url_found:
+                await self.raise_and_exit(RuntimeError("Captcha error: no captcha url"))
+            captcha_url = captcha_url_found[0]
+            showcaptcha = await self.session.post("http://kinopoisk.ru" + captcha_url)
+            showcaptcha_text = await showcaptcha.text()
+            captcha_image_found = re.findall(
+                r"(?<=src\=\"http://kinopoisk.ru/captchaimg\?).*?(?=\")",
+                showcaptcha_text,
+            )
+            if not captcha_image_found:
+                await self.raise_and_exit(RuntimeError("Captcha image not found"))
+            captcha_image_url = captcha_image_found[0]
+            await self._download_captcha(
+                "http://kinopoisk.ru/captchaimg?" + captcha_image_url
+            )
+            checkcaptcha_found = re.findall(
+                r"(?<=checkcaptcha\?).*?(?=\")", showcaptcha_text
+            )
+            aesKey_found = re.findall(r"(?<=aesKey:\").*?(?=\")", showcaptcha_text)
+            signKey_found = re.findall(r"(?<=aesSign:\").*?(?=\")", showcaptcha_text)
+            if not checkcaptcha_found or not aesKey_found or not signKey_found:
+                await self.raise_and_exit(
+                    RuntimeError(
+                        "not checkcaptcha_found or not aesKey_found or not signKey_found"
+                    )
+                )
+            captcha_input = await ainput("Enter captcha:")
+            checkcaptcha = await self.session.get(
+                "http://kinopoisk.ru/checkcaptcha?" + checkcaptcha_found[0],
+                data={
+                    "rep": captcha_input,
+                    "aesKey": aesKey_found[0],
+                    "signKey": signKey_found[0],
+                },
+                params={"rep": captcha_input},
+            )
+            if "showcaptcha" in str(checkcaptcha.url):
+                req = checkcaptcha
+                continue
+            if str(checkcaptcha.url) == "https://www.kinopoisk.ru/":
+                break
+            await self.raise_and_exit(
+                RuntimeError(
+                    f"Kinopoisk login captcha: unexpected response {checkcaptcha.url}"
+                )
+            )
+        return req
 
 
 client = 0
@@ -340,7 +384,7 @@ global_queue = asyncio.Queue()
 async def main():
     global client
     logger = logging.getLogger()
-    logger.setLevel(logging.ERROR)
+    logger.setLevel(logging.INFO)
     ch = logging.StreamHandler()
     ch.setLevel(logging.DEBUG)
     formatter = logging.Formatter(
@@ -351,19 +395,27 @@ async def main():
     logging.getLogger("asyncio").setLevel(logging.WARNING)
 
     login, password = await load_credentials("credentials.txt")
-    client = YandexClient()
-    await client.login_yandex(login, password)
+    yandex_client = YandexClient()
+    await yandex_client.login(login, password)
     print("starting kinopoisk")
-    await client.login_kinopoisk()
+    kinopoisk_client = KinopoiskClient(yandex_client)
+    await kinopoisk_client.login()
+    print(
+        await (
+            await kinopoisk_client.session.get(
+                "https://api.ott.kinopoisk.ru/v12/profiles/me?serviceId=25"
+            )
+        ).text()
+    )
 
-    r2 = await client.session.get("https://www.kinopoisk.ru/api/mda-status/")
-    await save_page("sso4", r2)
     if not JUPYTER:
-        await client.close()
+        await kinopoisk_client.close_session()
+        await yandex_client.close_session()
         await asyncio.gather(*asyncio.all_tasks() - {asyncio.current_task()})
 
 
 JUPYTER = False
+CC_DEBUG = True
 if __name__ == "__main__":
     print("__main__")
     asyncio.run(main())
