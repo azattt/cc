@@ -1,4 +1,5 @@
 import copy
+import json
 import re
 import asyncio
 import logging
@@ -38,8 +39,8 @@ class YaClient:
         self.cookie_save_path = cookie_save_path
         self.logger: logging.Logger
 
-    def create_session(self, user_agent: str) -> aiohttp.ClientSession:
-        session = aiohttp.ClientSession()
+    def create_session(self, user_agent: str, **kwargs) -> aiohttp.ClientSession:
+        session = aiohttp.ClientSession(**kwargs)
         session.headers.update({"user-agent": user_agent})
         return session
 
@@ -228,15 +229,22 @@ class YandexClient(YaClient):
 class KinopoiskClient(YaClient):
     FAKE_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/103.0.5060.134 Safari/537.36 OPR/89.0.4447.83"
 
-    def __init__(self, yandex_client_already_logined: YandexClient) -> None:
+    def __init__(
+        self,
+        yandex_client_already_logined: YandexClient,
+        trace_configs: list[aiohttp.TraceConfig] = None,
+    ) -> None:
         super().__init__()
         self.kinopoisk_retries = 10
         self.logger = logging.getLogger("kinopoisk_client")
         self.bound_yandex_client = yandex_client_already_logined
-        self.session = self.create_session(yandex_client_already_logined.user_agent)
+        self.session = self.create_session(
+            yandex_client_already_logined.user_agent, trace_configs=trace_configs
+        )
         self.session.cookie_jar._cookies = copy.deepcopy(
             yandex_client_already_logined.session.cookie_jar._cookies
         )
+        self.graphql_schema_container: dict[str, str] = {}
 
     async def check_login(self):
         async with self.session.get("https://www.kinopoisk.ru/api/mda-status/") as resp:
@@ -376,6 +384,48 @@ class KinopoiskClient(YaClient):
             )
         return req
 
+    async def get_graphql_schema(self, name: str):
+        if name not in self.graphql_schema_container:
+            async with aiofiles.open("graphql_schema/" + name, encoding="utf8") as file:
+                self.graphql_schema_container[name] = await file.read()
+        return self.graphql_schema_container[name]
+
+    async def do_search(self, query: str, limit: int = 5):
+        """search everything, just like from top input box on main kinopoisk page"""
+        schema = await self.get_graphql_schema("SuggestSearch.graphql")
+
+        resp = await self.session.post(
+            "https://graphql.kinopoisk.ru/graphql/?operationName=SuggestSearch",
+            json={
+                "operationName": "SuggestSearch",
+                "query": schema,
+                "variables": {"keyword": query, "limit": limit},
+            },
+            headers={"service-id": "25"},
+        )
+
+        return await resp.json()
+
+    async def do_hd_search(self, query: str, limit: int = 5):
+        """Search movies avaliable to watch on hd.kinopoisk.ru"""
+        schema = await self.get_graphql_schema("SuggestSearchOnline.graphql")
+
+        resp = await self.session.post(
+            "https://graphql.kinopoisk.ru/graphql/?operationName=SuggestSearchOnline",
+            json={
+                "operationName": "SuggestSearchOnline",
+                "query": schema,
+                "variables": {"keyword": query, "limit": limit},
+            },
+            headers={"service-id": "25"},
+        )
+
+        return await resp.json()
+
+    async def do_old_search(self):
+        """Search old kinopoisk(before yandex) way"""
+        raise NotImplementedError()
+
 
 client = 0
 global_queue = asyncio.Queue()
@@ -397,8 +447,10 @@ async def main():
     login, password = await load_credentials("credentials.txt")
     yandex_client = YandexClient()
     await yandex_client.login(login, password)
+
     print("starting kinopoisk")
     kinopoisk_client = KinopoiskClient(yandex_client)
+
     await kinopoisk_client.login()
     print(
         await (
@@ -407,6 +459,10 @@ async def main():
             )
         ).text()
     )
+    print(await kinopoisk_client.do_hd_search("office"))
+
+    r = await kinopoisk_client.session.post("https://www.kinopoisk.ru/api/profile/")
+    print(await r.json())
 
     if not JUPYTER:
         await kinopoisk_client.close_session()

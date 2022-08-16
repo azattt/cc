@@ -1,0 +1,83 @@
+query SuggestSearchOnline($keyword: String!, $limit: Int) {
+  suggest(keyword: $keyword) {
+    movies(limit: $limit, isOnline: true) {
+      items {
+        movie {
+          ...SuggestMovieItem
+          __typename
+        }
+        __typename
+      }
+      __typename
+    }
+    __typename
+  }
+}
+fragment SuggestMovieItem on Movie {
+  id
+  title {
+    russian
+    original
+    __typename
+  }
+  rating {
+    kinopoisk {
+      isActive
+      value
+      __typename
+    }
+    __typename
+  }
+  poster {
+    avatarsUrl
+    fallbackUrl
+    __typename
+  }
+  viewOption {
+    buttonText
+    isAvailableOnline: isWatchable(
+      filter: { anyDevice: false, anyRegion: false }
+    )
+    purchasabilityStatus
+    subscriptionPurchaseTag
+    type
+    availabilityAnnounce {
+      groupPeriodType
+      announcePromise
+      availabilityDate
+      type
+      __typename
+    }
+    __typename
+  }
+  ... on Film {
+    type
+    productionYear
+    __typename
+  }
+  ... on TvSeries {
+    releaseYears {
+      end
+      start
+      __typename
+    }
+    __typename
+  }
+  ... on TvShow {
+    releaseYears {
+      end
+      start
+      __typename
+    }
+    __typename
+  }
+  ... on MiniSeries {
+    releaseYears {
+      end
+      start
+      __typename
+    }
+    __typename
+  }
+  __typename
+}
