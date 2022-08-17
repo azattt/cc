@@ -8,6 +8,8 @@ import uuid
 import aiohttp
 import aiofiles
 
+from yaclient_exceptions import LicenseNotApprovedError
+
 
 async def save_page(filename: str, request: aiohttp.ClientResponse):
     async with aiofiles.open(
@@ -57,11 +59,10 @@ class YaClient:
             None, self.session.cookie_jar.load, self.cookie_save_path
         )
 
-    async def _download_captcha(self, url):
+    async def _download_captcha(self, url: str):
         async with self.session.get(url) as resp:
-            f = await aiofiles.open("debug/captcha.jpg", mode="wb+")
-            await f.write(await resp.read())
-            await f.close()
+            async with aiofiles.open("debug/captcha.jpg", mode="wb+") as f:
+                await f.write(await resp.read())
 
     async def raise_and_exit(self, exc: Exception):
         await self.close_session()
@@ -244,7 +245,8 @@ class KinopoiskClient(YaClient):
         self.session.cookie_jar._cookies = copy.deepcopy(
             yandex_client_already_logined.session.cookie_jar._cookies
         )
-        self.graphql_schema_container: dict[str, str] = {}
+        self.schemas_directory = "graphql_schema/"
+        self.graphql_schemas: dict[str, str] = {}
 
     async def check_login(self):
         async with self.session.get("https://www.kinopoisk.ru/api/mda-status/") as resp:
@@ -385,10 +387,12 @@ class KinopoiskClient(YaClient):
         return req
 
     async def get_graphql_schema(self, name: str):
-        if name not in self.graphql_schema_container:
-            async with aiofiles.open("graphql_schema/" + name, encoding="utf8") as file:
-                self.graphql_schema_container[name] = await file.read()
-        return self.graphql_schema_container[name]
+        if name not in self.graphql_schemas:
+            async with aiofiles.open(
+                self.schemas_directory + name, encoding="utf8"
+            ) as file:
+                self.graphql_schemas[name] = await file.read()
+        return self.graphql_schemas[name]
 
     async def do_search(self, query: str, limit: int = 5):
         """search everything, just like from top input box on main kinopoisk page"""
@@ -426,13 +430,48 @@ class KinopoiskClient(YaClient):
         """Search old kinopoisk(before yandex) way"""
         raise NotImplementedError()
 
+    async def convert_kp_to_kphd_id(self, id: int) -> str:
+        resp = await self.session.get(
+            f"https://www.kinopoisk.ru/film/{id}/watch/", allow_redirects=False
+        )
+        return resp.headers["location"][:-1].split("/")[-1]
 
-client = 0
+    async def get_film_children(self, kphd_id: str) -> dict:
+        resp = await self.session.get(
+            f"https://api.ott.kinopoisk.ru/v12/hd/content/{kphd_id}/children"
+        )
+        return await resp.json()
+
+    async def get_streams(self, content_id: str) -> dict:
+        resp = await self.session.get(
+            f"https://api.ott.kinopoisk.ru/v12/hd/content/{content_id}/streams?serviceId=25"
+        )
+        return await resp.json()
+
+    async def create_web_streams(self, streams_from_get_streams_function: dict) -> bool:
+        """call get_streams and pass output to this function"""
+        if streams_from_get_streams_function["licenseStatus"] != "APPROVED":
+            raise LicenseNotApprovedError()
+        if len(streams_from_get_streams_function["streams"]) > 1:
+            raise NotImplementedError("(temporarily) got more than 1 stream")
+
+        stream = streams_from_get_streams_function["streams"][0]
+        supported_drm_types = ["widevine"]
+        if stream["drmType"] not in supported_drm_types:
+            raise NotImplementedError(f"{stream['drmType']}")
+
+        async with self.session.get(stream["uri"]) as resp:
+            async with aiofiles.open("web/test.mpd", mode="wb+") as f:
+                await f.write(await resp.read())
+        async with self.session.get(stream["drmConfig"]) as resp:
+            async with aiofiles.open("web/key.bin", mode="wb+") as f:
+                await f.write(await resp.read())
+
+
 global_queue = asyncio.Queue()
 
 
 async def main():
-    global client
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
     ch = logging.StreamHandler()
@@ -452,17 +491,28 @@ async def main():
     kinopoisk_client = KinopoiskClient(yandex_client)
 
     await kinopoisk_client.login()
-    print(
-        await (
-            await kinopoisk_client.session.get(
-                "https://api.ott.kinopoisk.ru/v12/profiles/me?serviceId=25"
-            )
-        ).text()
-    )
-    print(await kinopoisk_client.do_hd_search("office"))
+    # print(await kinopoisk_client.do_search("office"))
 
-    r = await kinopoisk_client.session.post("https://www.kinopoisk.ru/api/profile/")
-    print(await r.json())
+    office_kphdid = await kinopoisk_client.convert_kp_to_kphd_id(253245)
+    print(office_kphdid)
+    with open("debug/output.json", "w+", encoding="utf8") as file:
+        file.write(
+            json.dumps(
+                await kinopoisk_client.get_film_children(office_kphdid), indent=4
+            )
+        )
+
+    desired = "4a769a24279de0beb3bc1307115f383b"
+    desired = "4d8e77796bc0a8f199b48f1b408ecdde"
+    async with kinopoisk_client.session.get(
+        (await kinopoisk_client.get_streams(desired))["streams"][0]["uri"]
+    ) as resp:
+        async with aiofiles.open("web/test.mpd", mode="wb+") as f:
+            await f.write(await resp.read())
+
+    async with aiofiles.open("debug/output.json", mode="w+", encoding="utf8") as f:
+        resp = await kinopoisk_client.get_streams(desired)
+        await f.write(json.dumps(resp, indent=4))
 
     if not JUPYTER:
         await kinopoisk_client.close_session()
