@@ -23,13 +23,14 @@ async def main():
     login, password = await load_credentials("credentials.txt")
     yandex_client = YandexClient()
     yandex_client.create_session()
-    await yandex_client.login(login, password)
+    await yandex_client.try_login(login, password)
 
     print("starting kinopoisk")
     kinopoisk_client = KinopoiskClient(yandex_client)
     kinopoisk_client.create_session()
-
+    print("kinopoisk_2")
     await kinopoisk_client.login()
+    print("successful login")
     # print(await kinopoisk_client.do_search("office"))
 
     office_kphdid = await kinopoisk_client.convert_kp_to_kphd_id(253245)

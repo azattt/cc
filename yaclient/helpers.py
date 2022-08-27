@@ -24,3 +24,7 @@ async def load_credentials(filename: str) -> list[str, str]:
         login = (await file.readline()).strip()
         password = (await file.readline()).strip()
     return (login, password)
+
+
+def filter_keys(old_dict: dict, your_keys: list):
+    return {your_key: old_dict[your_key] for your_key in your_keys}

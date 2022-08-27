@@ -1,126 +1,132 @@
-function fromCharCodeimpl() {
-    /** @param {number} size @return {boolean} */
-    const supportsChunkSize = (size) => {
-        try {
-            // The compiler will complain about suspicious value if this isn't
-            // stored in a variable and used.
-            const buffer = new Uint8Array(size);
-            // This can't use the spread operator, or it blows up on Xbox One.
-            // So we use apply() instead, which is normally not allowed.
-            // See issue #2186 for more details.
-            // eslint-disable-next-line no-restricted-syntax
-            const foo = String.fromCharCode.apply(null, buffer);
-            return foo.length > 0; // Actually use "foo", so it's not compiled out.
-        } catch (error) {
-            return false;
-        }
-    };
-    // Different browsers support different chunk sizes; find out the largest
-    // this browser supports so we can use larger chunks on supported browsers
-    // but still support lower-end devices that require small chunks.
-    // 64k is supported on all major desktop browsers.
-    for (let size = 64 * 1024; size > 0; size /= 2) {
-        if (supportsChunkSize(size)) {
-            return (buffer) => {
-                let ret = '';
-                for (let i = 0; i < buffer.length; i += size) {
-                    const subArray = buffer.subarray(i, i + size);
-                    // This can't use the spread operator, or it blows up on Xbox One.
-                    // So we use apply() instead, which is normally not allowed.
-                    // See issue #2186 for more details.
-                    // eslint-disable-next-line no-restricted-syntax
-                    ret += String.fromCharCode.apply(null, subArray);  // Issue #2186
-                }
-                return ret;
-            };
-        }
-    }
-    return null;
-}
-function fromCharCode(array) {
-    return fromCharCodeimpl()(array);
+let host = window.location.host;
+var uuid_lookuptable = []; for (var i = 0; i < 256; i++) { uuid_lookuptable[i] = (i < 16 ? '0' : '') + (i).toString(16); }
+function uuid4() {
+    var d0 = Math.random() * 0xffffffff | 0;
+    var d1 = Math.random() * 0xffffffff | 0;
+    var d2 = Math.random() * 0xffffffff | 0;
+    var d3 = Math.random() * 0xffffffff | 0;
+    return uuid_lookuptable[d0 & 0xff] + uuid_lookuptable[d0 >> 8 & 0xff] + uuid_lookuptable[d0 >> 16 & 0xff] + uuid_lookuptable[d0 >> 24 & 0xff] + '-' +
+        uuid_lookuptable[d1 & 0xff] + uuid_lookuptable[d1 >> 8 & 0xff] + '-' + uuid_lookuptable[d1 >> 16 & 0x0f | 0x40] + uuid_lookuptable[d1 >> 24 & 0xff] + '-' +
+        uuid_lookuptable[d2 & 0x3f | 0x80] + uuid_lookuptable[d2 >> 8 & 0xff] + '-' + uuid_lookuptable[d2 >> 16 & 0xff] + uuid_lookuptable[d2 >> 24 & 0xff] +
+        uuid_lookuptable[d3 & 0xff] + uuid_lookuptable[d3 >> 8 & 0xff] + uuid_lookuptable[d3 >> 16 & 0xff] + uuid_lookuptable[d3 >> 24 & 0xff];
 }
 
-function unsafeGetArrayBuffer_(view) {
-    if (view instanceof ArrayBuffer) {
-        return view;
+let test = "https://strm.yandex.ru/vh-ottenc-converted/vod-content/4d8e77796bc0a8f199b48f1b408ecdde/8859010x1637749503x290129bd-7e37-4db1-87c8-e5a5a4245e06/dash-cenc/ysign1=625a47406912e907cec65cdebb99c84b854f416f3d8f1c4ec1b3bf227166f6cc,abcID=1358,from=ott-kp,pfx,sfx,ts=630c8dd1/sdr_hd_avc_aac.mpd?ottsession=e5a6290b0a3d4eadb2c3ca936ac4047c&testid=633106&testid=628191"
+let manifestUri = "https://" + host + "/manifest?url=" + encodeURIComponent(test)
+function initApp() {
+    // Install built-in polyfills to patch browser incompatibilities.
+    shaka.polyfill.installAll();
+    // Check to see if the browser supports the basic APIs Shaka needs.
+    if (shaka.Player.isBrowserSupported()) {
+        // Everything looks good!
+        initPlayer();
     } else {
-        return view.buffer;
+        // This browser does not have the minimum set of APIs we need.
+        // alert('Browser not supported!');
+        console.log("Browser not supported")
     }
 }
-function view_(data, offset, length, Type) {
-    const buffer = unsafeGetArrayBuffer_(data);
-    // Absolute end of the |data| view within |buffer|.
-    /** @suppress {strictMissingProperties} */
-    const dataEnd = (data.byteOffset || 0) + data.byteLength;
-    // Absolute start of the result within |buffer|.
-    /** @suppress {strictMissingProperties} */
-    const rawStart = (data.byteOffset || 0) + offset;
-    const start = Math.max(0, Math.min(rawStart, dataEnd));
-    // Absolute end of the result within |buffer|.
-    const end = Math.min(start + Math.max(length, 0), dataEnd);
-    return new Type(buffer, start, end - start);
-}
+async function initPlayer() {
+    // Create a Player instance.
+    const video = document.getElementById('video');
+    const player = new shaka.Player(video);
+    player.configure({
+        streaming: {
+            bufferingGoal: 1,
+            retryParameters: {
+                maxAttempts: 10,
+                stallTimeout: 0,
+                timeout: 1000,
+                connectionTimeout: 0
+            }
+        }
+    });
+    // player.regis
+    const videoWrapper = document.getElementById("videoWrapper")
+    const ui = new shaka.ui.Overlay(player, videoWrapper,
+        video);
+    const config = {
+        'controlPanelElements': ['quality', 'language', 'captions', 'fullscreen']
+    };
+    ui.configure(config);
 
-function toUint8(data, offset = 0, length = Infinity) {
-    return view_(data, offset, length, Uint8Array);
-}
+    player.configure({
+        drm: {
+            servers: {
+                'com.widevine.alpha': 'https://widevine-proxy.ott.yandex.ru/proxy'
+            },
+        }
+    });
 
-function toStandardBase64(data) {
-    const bytes = fromCharCode(
-        toUint8(data));
-    return btoa(bytes);
-}
-function toBase64(data, padding) {
-    padding = (padding == undefined) ? true : padding;
-    const base64 = toStandardBase64(data)
-        .replace(/\+/g, '-').replace(/\//g, '_');
-    return padding ? base64 : base64.replace(/[=]*$/, '');
-}
+    player.getNetworkingEngine().registerRequestFilter(function (type, request) {
+        if (type == shaka.net.NetworkingEngine.RequestType.LICENSE) {
+            // redirect to our server
+            request.uris[0] = "https://" + host + "/drm?url=" + encodeURIComponent(request.uris[0])
+            b64encoded = request.body
+            request.body = JSON.stringify({
+                   "puid": 426134986,
+                    "watchSessionId": "78cba1e69d4744afa59aa3eddac27c80",
+                    "contentId": "4d8e77796bc0a8f199b48f1b408ecdde",
+                    "contentTypeId": 21,
+                    "serviceName": "ott-kp",
+                    "productId": 2,
+                    "monetizationModel": "SVOD",
+                    "expirationTimestamp": 1661383520,
+                    "verificationRequired": true,
+                    "signature": "f4165e89d1ce057e522db4d23f5b6fb14d8da76a",
+                    "version": "V4",
+                "rawLicenseRequestBase64": shaka.util.Uint8ArrayUtils.toBase64(new Uint8Array(request.body))
+            })
+        } else if (type == shaka.net.NetworkingEngine.RequestType.SEGMENT) {
+            for (let i = 0; i < request.uris.length; i++) {
+                request.uris[i] = "https://" + host + "/segment?url=" + encodeURIComponent(request.uris[i]);
+                request.headers["X-Request-Id"] = uuid4()
+            }
+        }
+    })
 
-let filterLicenseRequest = function (request) {
-    console.log(request.data)
-    request.headers = {
-        "Content-Type": "application/json"
+    // Attach player to the window to make it easy to access in the JS console.
+    window.player = player;
+
+    // Listen for error events.
+    player.addEventListener('error', onErrorEvent);
+
+    // Try to load a manifest.
+    // This is an asynchronous process.
+    try {
+        await player.load(manifestUri);
+        // This runs if the asynchronous load is successful.
+        console.log('The video has now been loaded!');
+    } catch (e) {
+        // onError is executed if the asynchronous load fails.
+        onError(e);
     }
-    request.url = "/drm?url=" + encodeURIComponent(request.url)
-    let utf8Encode = new TextEncoder();
-    const b64encoded = toBase64(request.data)
-    request.data = utf8Encode.encode(JSON.stringify({
-        "puid": 426134986,
-        "watchSessionId": "6f414ffbdc7c41b2a9e4b57e3b60ddfa",
-        "contentId": "4d8e77796bc0a8f199b48f1b408ecdde",
-        "contentTypeId": 21,
-        "serviceName": "ott-kp",
-        "productId": 2,
-        "monetizationModel": "SVOD",
-        "expirationTimestamp": 1660868561,
-        "verificationRequired": true,
-        "signature": "e31acdd9598da46a05033591c96a11de944d02bf",
-        "version": "V4",
-        "rawLicenseRequestBase64": b64encoded
-    }))
-    console.log(b64encoded)
-    return Promise.resolve();
+}
+function onErrorEvent(event) {
+    // Extract the shaka.util.Error object from the event.
+    // fetch('/error', {
+    //     'method': 'POST',
+    //     'body': JSON.stringify(error)
+    // })
+    onError(event.detail);
 }
 
-let filterLicenseResponse = function (response) {
-    return Promise.resolve();
+function onError(error) {
+    // Log the error.
+    console.error('Error code', error.code, 'object', error);
+    // fetch('/error', {
+    //     'method': 'POST',
+    //     'body': JSON.stringify(error)
+    // })
 }
 
+// window.addEventListener("keydown", function (e) {
+//     fetch('/error', {
+//         'method': 'POST',
+//         'body': JSON.stringify(e.code)
+//     })
+// });
 
-let player = dashjs.MediaPlayer().create();
-const protData = {
-    "com.widevine.alpha": {
-        "serverURL": "https://widevine-proxy.ott.yandex.ru/proxy"
-    },
-};
-
-player.setProtectionData(protData);
-
-player.registerLicenseRequestFilter(filterLicenseRequest);
-player.registerLicenseResponseFilter(filterLicenseResponse);
-let main = "/dash?url="
-let test = "https://strm.yandex.ru/vh-ottenc-converted/vod-content/4d8e77796bc0a8f199b48f1b408ecdde/8859010x1637749503x290129bd-7e37-4db1-87c8-e5a5a4245e06/dash-cenc/ysign1=8041346f8e0edbc86108d9350245c9b12f6a3c0e44f1d65690e9eb2e20e4d8f9,abcID=1358,from=ott-kp,pfx,sfx,ts=630bb271/sdr_hd_avc_aac.mpd?ottsession=6f414ffbdc7c41b2a9e4b57e3b60ddfa&testid=632399&testid=633106&testid=628191"
-//main = "/lotofdata?url="
-player.initialize(document.querySelector("video"), main + encodeURIComponent(test), true);
+document.addEventListener("DOMContentLoaded", (e) => {
+    initApp();
+})

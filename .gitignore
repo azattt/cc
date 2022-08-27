@@ -1,5 +1,5 @@
-debug/
+/debug/
 __pycache__/
-credentials.txt
-test.ipynb
 cookie.bin
+/static/img
+/server_flask.py
