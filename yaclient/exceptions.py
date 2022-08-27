@@ -7,3 +7,11 @@ class LicenseNotApprovedError(Exception):
 
 class WrongCredentialsError(Exception):
     """Occurs when you try to login with false credentials"""
+
+
+class WrongCaptchaAnswerError(Exception):
+    """Wrong captcha passed"""
+
+
+class WrongChallengeAnswerError(Exception):
+    """Wrong sms-code"""

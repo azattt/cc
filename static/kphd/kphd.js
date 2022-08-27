@@ -1,3 +1,4 @@
+
 (function () {
     "use strict";
     const apiUrl = window.location.origin + "/api/v1";
@@ -36,24 +37,40 @@
             this.backgroundEl = null;
             this.wrapperEl = null;
             this.formEl = null;
-            this.elements = [];
+            this.elements = {};
+            this.elementID = 0;
+            this.elementsOrder = [];
+        }
+        getNewId() {
+            this.elementID += 1;
+            return this.elementID;
+        }
+        addNewItem(item) {
+            let id = this.getNewId();
+            this.elements[id] = img;
+            this.elementsOrder.push(id);
+            return id;
         }
         addInput(input) {
-            this.elements.push(input);
+            return this.addNewItem(input);
         }
         addInputs(inputArray) {
-            this.elements = this.elements.concat(inputArray);
+            arr = [];
+            for (let input of inputArray) {
+                arr.push(this.addNewItem(input));
+            }
+            return arr;
         }
         addImage(img) {
-            this.elements.push(img);
+            return this.addNewItem(img);
         }
         addSubmit(buttonText) {
             let el = { raw: `<input class="form-submit" type="submit" value="${buttonText}">`, dom: null };
-            this.elements.push(el);
+            return this.addNewItem(el);
         }
         addText(text) {
             let el = { raw: `<div class="form-text">${text}</div>`, dom: null };
-            this.elements.push(el);
+            return this.addNewItem(el);
         }
         setTitle(title) {
             if (this.titleEl) {
@@ -189,6 +206,8 @@
         formHandler.setSubmitCallback((e, formHandler) => {
             const data = new FormData(e.target);
             let allRight = true;
+            e.target.password.style = "";
+            e.target.login.style = "";
             if (!data.get("login")) {
                 e.target.login.style = "outline: 2px solid red;";
                 allRight = false;
@@ -224,7 +243,7 @@
         if (resp.type == "js-domik-captcha") {
             let captcha_image = new FormImage();
             let captcha_input = new FormInput();
-            captcha_image.createDefault("static/img/captcha.jpg");
+            captcha_image.createDefault(resp.captchaUrl);
             captcha_input.createDefault("captcha", {
                 placeholder: ""
             });
@@ -233,9 +252,44 @@
             formHandler.addImage(captcha_image);
             formHandler.addInput(captcha_input);
             formHandler.drawNewElements(submitEl);
+            formHandler.setSubmitCallback((e, formHandler) => {
+                const data = new FormData(e.target);
+                let allRight = true;
+                if (!data.get("login")) {
+                    e.target.login.style = "outline: 2px solid red;";
+                    allRight = false;
+                }
+                if (!data.get("password")) {
+                    e.target.password.style = "outline: 2px solid red;";
+                    allRight = false;
+                }
+                if (!data.get("captcha")) {
+                    e.target.captcha.style = "outline: 2px solid red;";
+                }
+                let request = resp;
+                request.data.answer = data.get("captcha");
+                request.data.passwd = data.get("password");
+                request.data.login = data.get("login");
+                fetch(apiUrl + request.apiLocation, {
+                    method: request.apiMethod,
+                    body: JSON.stringify(request)
+                }).then(resp => resp.json())
+                    .then((resp) => {
+                        console.log(resp);
+                        if (resp.result == "ok") {
+
+                        } else if (resp.result == "error") {
+                            showNotification(resp.verbose, 3000);
+                        }
+                    });
+                e.preventDefault();
+            });
+
+        }
+        else if (resp.type == "challenge") {
             fetch(apiUrl + resp.apiLocation, {
-                method: "POST",
-                body: JSON.stringify(resp)
+                "method": resp.apiMethod,
+                "body": JSON.stringify(resp)
             });
         }
     }

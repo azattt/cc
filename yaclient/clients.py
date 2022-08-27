@@ -9,7 +9,12 @@ import aiohttp
 import aiofiles
 
 from yaclient.helpers import ainput, save_page
-from yaclient.exceptions import LicenseNotApprovedError, WrongCredentialsError
+from yaclient.exceptions import (
+    LicenseNotApprovedError,
+    WrongCaptchaAnswerError,
+    WrongChallengeAnswerError,
+    WrongCredentialsError,
+)
 
 STATUS_OK = 0
 STATUS_CAPTCHA = 1
@@ -59,7 +64,10 @@ class YandexClient(YaClient):
         self.debug = False
         self.logger = logging.getLogger("YandexClient")
 
-    async def handle_challenge(self, data: dict):
+    async def request_challenge(self, data: dict):
+        if data["method"] != "POST":
+            raise RuntimeError("method != POST")
+
         validate_phone_by_id = await self.session.post(
             data["url"],
             data=data["data"],
@@ -68,6 +76,7 @@ class YandexClient(YaClient):
         validate_phone_by_id_json = await validate_phone_by_id.json()
         if validate_phone_by_id_json["status"] != "ok":
             raise RuntimeError('Challenge: "validate_phone_by_id" status != ok')
+        print(validate_phone_by_id_json)
         code_submit = await self.session.post(
             "https://passport.yandex.ru/registration-validations/phone-confirm-code-submit",
             data={
@@ -75,32 +84,47 @@ class YandexClient(YaClient):
                 "confirm_method": "by_sms",
                 "isCodeWithFormat": "true",
             },
-            headers={"X-Requested-With": "XMLHttpRequest"},
+            headers=data["headers"],
         )
         code_submit_json = await code_submit.json()
         if code_submit_json["status"] != "ok":
+            print(
+                code_submit_json,
+                {
+                    **data["data"],
+                    "confirm_method": "by_sms",
+                    "isCodeWithFormat": "true",
+                },
+            )
             raise RuntimeError('Challenge: "code_submit" status != ok')
 
-        while True:
-            code_input = await ainput("Enter code from SMS:")
-            code_confirm_resp = await self.session.post(
-                "https://passport.yandex.ru/registration-validations/phone-confirm-code",
-                data={
-                    "code": code_input,
-                    "csrf_token": data["csrf_token"],
-                    "track_id": data["track_id"],
-                },
-                headers={"X-Requested-With": "XMLHttpRequest"},
-            )
-            code_confirm_json = await code_confirm_resp.json()
-            if code_confirm_json["status"] == "ok":
-                asyncio.create_task(self.do_save_cookies())
-                return
-            if code_confirm_json["status"] == "error" and code_confirm_json[
-                "errors"
-            ] == ["code.invalid"]:
-                continue
-            raise RuntimeError(f"Unexpected error {code_confirm_json}")
+        return {
+            "type": "challenge_1",
+            "method": "POST",
+            "headers": {"X-Requested-With": "XMLHttpRequest"},
+            "data": {"csrf_token": data["csrf_token"], "track_id": data["track_id"]},
+            "required": "sms_code",
+        }
+
+    async def pass_challenge(self, data: dict):
+        code_confirm_resp = await self.session.post(
+            "https://passport.yandex.ru/registration-validations/phone-confirm-code",
+            data={
+                "code": data["variables"]["code_input"],
+                "csrf_token": data["csrf_token"],
+                "track_id": data["track_id"],
+            },
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
+        code_confirm_json = await code_confirm_resp.json()
+        if code_confirm_json["status"] == "ok":
+            asyncio.create_task(self.do_save_cookies())
+            return
+        if code_confirm_json["status"] == "error" and code_confirm_json["errors"] == [
+            "code.invalid"
+        ]:
+            raise WrongChallengeAnswerError("Wrong sms-code")
+        raise RuntimeError(f"Unexpected error {code_confirm_json}")
 
     async def check_login(self):
         async with self.session.get(
@@ -145,6 +169,7 @@ class YandexClient(YaClient):
             return {
                 "type": "challenge",
                 "url": "https://passport.yandex.ru/registration-validations/auth/validate_phone_by_id",
+                "method": "POST",
                 "headers": {"X-Requested-With": "XMLHttpRequest"},
                 "data": {
                     "phoneId": phoneId_found[0],
@@ -180,18 +205,17 @@ class YandexClient(YaClient):
                 "type": "js-domik-captcha",
                 "captchaUrl": captcha_url_found[0],
                 "url": "https://passport.yandex.ru/auth",
+                "method": "POST",
                 "data": auth_data,
             }
         # success
         asyncio.create_task(self.do_save_cookies())
         return 0
 
-    async def continue_captcha(self, data: dict, captcha_input: str):
-        data["answer"] = captcha_input
-
-        resp = await self.session.post(
-            "https://passport.yandex.ru/auth", data=data["data"]
-        )
+    async def continue_captcha(self, data: dict):
+        if data["method"] != "POST":
+            raise RuntimeError("Wrong method")
+        resp = await self.session.post(data["url"], data=data["data"])
         resp_text = await resp.text()
         if "Нет аккаунта" in resp_text:
             raise WrongCredentialsError("Wrong credentials (login)")
@@ -199,11 +223,10 @@ class YandexClient(YaClient):
             raise WrongCredentialsError("Wrong credentials (password)")
         if "Вы неверно ввели символы" in resp_text:
             # wrong captcha
-            return STATUS_WRONG_CAPTCHA
+            raise WrongCaptchaAnswerError("Wrong captcha")
         if "profile" in str(resp.url):
             # means success
             asyncio.create_task(self.do_save_cookies())
-            return 0
 
         raise RuntimeError(f"Unknown error {str(resp.url)}")
 
@@ -338,6 +361,7 @@ class KinopoiskClient(YaClient):
             "type": "kinopoisk-captcha",
             "captcha_url": captcha_image_url,
             "url": "http://kinopoisk.ru/checkcaptcha?" + checkcaptcha_found[0],
+            "method": "GET",
             "data": {
                 "aesKey": aesKey_found[0],
                 "signKey": signKey_found[0],

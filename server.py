@@ -1,48 +1,29 @@
 import asyncio
 import logging
 import sys
-import time
+from types import SimpleNamespace
+from urllib.parse import quote
 
 import aiohttp
 import aiohttp.web
 
-from urllib.parse import quote
-
-from yaclient.clients import STATUS_CAPTCHA, STATUS_OK, KinopoiskClient, YandexClient
-from yaclient.exceptions import WrongCredentialsError
-from yaclient.helpers import load_credentials
-
-
-async def on_request_start(session, trace_config_ctx, params):
-    logger = logging.getLogger(__name__)
-    logger.debug("Starting request %s %s %s", session, trace_config_ctx, params)
+from yaclient.clients import KinopoiskClient, YandexClient
+from yaclient.exceptions import (
+    WrongCaptchaAnswerError,
+    WrongChallengeAnswerError,
+    WrongCredentialsError,
+)
 
 
-async def on_request_end(session, trace_config_ctx, params):
-    logger = logging.getLogger(__name__)
-    logger.debug("Ending request")
-
-
-print_ = print
-
-
-def print(*args, **kwargs):
-    print_(str(time.time()), *args, **kwargs)
-
-
-trace_config = aiohttp.TraceConfig()
-# trace_config.on_request_chunk_sent.append(on_request_start)
-# trace_config.on_request_end.append(on_request_end)
-
+user_session = SimpleNamespace(authorized=False, auth_continue=None)
 routes = aiohttp.web.RouteTableDef()
 app = aiohttp.web.Application(client_max_size=1024 * 2**30)
 yandex_client = YandexClient()
-kinopoisk_client = KinopoiskClient(yandex_client, trace_configs=[trace_config])
+kinopoisk_client = KinopoiskClient(yandex_client)
 
 
 @routes.get("/")
 async def index(_):
-    print(1)
     return aiohttp.web.FileResponse("static/index.html")
 
 
@@ -53,7 +34,6 @@ async def lotofdata(request):
     web_response.content_length = response.content_length
     await web_response.prepare(request)
     async for data in response.content:
-        print("data")
         await web_response.write(data)
     await web_response.write_eof()
     return web_response
@@ -128,9 +108,15 @@ async def log(request: aiohttp.web.Request):
 
 
 @routes.get("/api/v1/checkKinopoiskAuth")
-async def check_kinopoisk_auth(_):
+async def check_kinopoisk_auth(request: aiohttp.web.Request):
     return aiohttp.web.json_response({"auth": False})
-    # return aiohttp.web.json_response({"auth": await kinopoisk_client.check_login()})
+    # forced = request.query["forced"]
+    # if forced:
+    #     resp = await kinopoisk_client.check_login()
+    #     user_session.authorized = resp
+    #     return aiohttp.web.json_response({"auth": resp})
+
+    # return user_session.authorized
 
 
 @routes.post("/api/v1/loginKinopoisk")
@@ -153,9 +139,17 @@ async def login_kinopoisk(request: aiohttp.web.Request):
         )
 
     if not need_to_continue:
+        user_session.authorized = True
         return aiohttp.web.json_response({"result": "ok"})
 
-    resp = {"result": "continue", "apiLocation": "/loginContinue", **need_to_continue}
+    user_session.authorized = False
+    user_session.auth_continue = need_to_continue
+    resp = {
+        "result": "continue",
+        "apiMethod": "POST",
+        "apiLocation": "/loginContinue",
+        **need_to_continue,
+    }
     if "captchaUrl" in resp:
         resp["captchaUrl"] = "/api/v1/getCaptchaImg?url=" + quote(resp["captchaUrl"])
 
@@ -164,10 +158,29 @@ async def login_kinopoisk(request: aiohttp.web.Request):
 
 @routes.post("/api/v1/loginContinue")
 async def login_continue(request: aiohttp.web.Request):
+    if not user_session.auth_continue:
+        return aiohttp.web.json_response(
+            {"result": "error", "reason": "did not start login process"}
+        )
     request_json = await request.json()
     if request_json["type"] == "js-domik-captcha":
-        print(request_json)
-    return aiohttp.web.HTTPOk()
+        try:
+            await yandex_client.continue_captcha(request_json)
+        except WrongCredentialsError as exc:
+            return aiohttp.web.json_response(
+                {"result": "error", "reason": "wrong credentials", "verbose": str(exc)}
+            )
+        except WrongCaptchaAnswerError as exc:
+            return aiohttp.web.json_response(
+                {"result": "error", "reason": "wrong captcha", "verbose": str(exc)}
+            )
+        user_session.authorized = True
+        user_session.auth_continue = False
+
+        return aiohttp.web.json_response({"result": "ok"})
+    if request_json["type"] == "challenge":
+        resp = await yandex_client.request_challenge(request_json)
+        return aiohttp.web.json_response({"result": "continue", **resp})
 
 
 @routes.get("/api/v1/getCaptchaImg")
@@ -206,6 +219,7 @@ async def main():
         "aiohttp.server",
         "aiohttp.web",
         "aiohttp.websocket",
+        "aiohttp",
     ]
     for aiohttp_logger_name in aiohttp_loggers:
         aiohttp_logger = logging.getLogger(aiohttp_logger_name)
